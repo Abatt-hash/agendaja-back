@@ -1,0 +1,602 @@
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import * as bcryptjs from 'bcryptjs';
+import { IsNull, Repository } from 'typeorm';
+import { PerfilPrestador } from './entities/perfil-prestador.entity';
+import { Usuario } from './entities/usuario.entity';
+import { CreateUsuarioDto } from './dto/create-usuario.dto';
+import { UpdateUsuarioDto } from './dto/update-usuario.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { BecomeProviderDto } from './dto/become-provider.dto';
+import { UpsertPerfilPrestadorDto } from './dto/upsert-perfil-prestador.dto';
+import { SearchPrestadoresDto } from './dto/search-prestadores.dto';
+import { isValidPhoneNumber, sanitizePhoneNumber } from '../../common/utils/phone.util';
+import { getPostgresErrorCode } from '../../common/utils/database-error.util';
+import { CloudinaryService, UploadedImageFile } from '../../common/storage/cloudinary.service';
+import { DistanceUtilService } from '../../common/utils/distance.util';
+import { Avaliacao } from '../appointments/entities/avaliacao.entity';
+import { ListProviderReviewsDto } from './dto/list-provider-reviews.dto';
+import { SugestaoPrestador } from './entities/sugestao.entity';
+import { CreateSuggestionDto } from './dto/create-suggestion.dto';
+import { AuthService } from '../auth/auth.service';
+
+@Injectable()
+export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
+  constructor(
+    @InjectRepository(Usuario)
+    private readonly usuariosRepository: Repository<Usuario>,
+    @InjectRepository(PerfilPrestador)
+    private readonly perfisRepository: Repository<PerfilPrestador>,
+    @Optional()
+    @InjectRepository(Avaliacao)
+    private readonly avaliacoesRepository?: Repository<Avaliacao>,
+    @Optional() private readonly distanceUtil?: DistanceUtilService,
+    @Optional() private readonly cloudinaryService?: CloudinaryService,
+    @Optional()
+    @InjectRepository(SugestaoPrestador)
+    private readonly sugestoesRepository?: Repository<SugestaoPrestador>,
+    @Optional()
+    private readonly authService?: AuthService,
+  ) {}
+
+  async create(dto: CreateUsuarioDto, ipAddress = 'unknown') {
+    const existing = await this.usuariosRepository.findOne({ where: { email: dto.email } });
+    if (existing) {
+      throw new ConflictException('E-mail já cadastrado');
+    }
+
+    const telefone = this.normalizePhoneOrThrow(dto.telefone);
+    const nomeCompleto =
+      dto.nome_completo?.trim() ||
+      dto.email
+        .split('@')[0]
+        .replace(/[._+-]+/g, ' ')
+        .trim() ||
+      'Cliente';
+
+    const usuario = this.usuariosRepository.create({
+      nome_completo: nomeCompleto.length >= 2 ? nomeCompleto : 'Cliente',
+      email: dto.email,
+      telefone,
+      foto_perfil: dto.foto_perfil ?? null,
+      tipo_conta: 'CLIENTE',
+      senha_hash: await bcryptjs.hash(dto.senha, 10),
+    });
+    let saved: Usuario;
+    try {
+      saved = await this.usuariosRepository.save(usuario);
+    } catch (error) {
+      if (getPostgresErrorCode(error) === '23505') {
+        throw new ConflictException('E-mail já cadastrado');
+      }
+      throw error;
+    }
+
+    const safeUser = this.withoutPassword(saved);
+    try {
+      const emailSent = await this.authService?.sendEmailVerification(saved, ipAddress);
+      if (!emailSent) {
+        return {
+          ...safeUser,
+          message:
+            'Conta criada, mas o limite de envio foi atingido. Aguarde antes de solicitar outro link.',
+        };
+      }
+      return {
+        ...safeUser,
+        message: 'Conta criada. Verifique seu e-mail para ativar o acesso.',
+      };
+    } catch (error) {
+      this.logger.error(
+        'Email verification delivery failed after account creation',
+        error instanceof Error ? error.stack : undefined,
+      );
+      return {
+        ...safeUser,
+        message:
+          'Conta criada, mas o e-mail de verificação não pôde ser enviado. Solicite um novo envio.',
+      };
+    }
+  }
+
+  async findAll() {
+    const usuarios = await this.usuariosRepository.find({
+      where: { deleted_at: IsNull() },
+      relations: { perfil_prestador: true },
+    });
+    return usuarios.map((usuario) => this.withoutPassword(usuario));
+  }
+
+  async findPublicProvider(id: number) {
+    const provider = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, tipo_conta: 'PRESTADOR', deleted_at: IsNull() },
+      relations: { perfil_prestador: { servicos: { categoria: true } } },
+    });
+
+    if (!provider?.perfil_prestador) {
+      throw new NotFoundException('Prestador não encontrado');
+    }
+
+    return {
+      id_prestador: provider.id_usuario,
+      nome_completo: provider.nome_completo,
+      perfil: {
+        foto_perfil: provider.foto_perfil,
+        bio: provider.perfil_prestador.bio,
+        imagem_banner: provider.perfil_prestador.imagem_banner,
+        cidade: provider.perfil_prestador.cidade ?? null,
+        estado: provider.perfil_prestador.estado ?? null,
+      },
+      servicos: (provider.perfil_prestador.servicos ?? [])
+        .filter((service) => service.ativo)
+        .map((service) => ({
+          id_servico: service.id_servico,
+          titulo: service.titulo,
+          descricao: service.descricao,
+          preco: service.preco == null ? null : Number(service.preco),
+          duracao_padrao: service.duracao_padrao,
+          categoria: service.categoria
+            ? { id_categoria: service.categoria.id_categoria, nome: service.categoria.nome }
+            : null,
+        })),
+    };
+  }
+
+  async findPublicProviderReviews(id: number, dto: ListProviderReviewsDto) {
+    const provider = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, tipo_conta: 'PRESTADOR', deleted_at: IsNull() },
+      select: { id_usuario: true },
+    });
+    if (!provider) {
+      throw new NotFoundException('Prestador não encontrado');
+    }
+
+    const reviewsRepository = this.avaliacoesRepository;
+    if (!reviewsRepository) {
+      throw new Error('Repositórios de avaliações não estão configurados');
+    }
+
+    const pagina = dto.pagina ?? 1;
+    const limite = dto.limite ?? 10;
+    const [reviews, total] = await reviewsRepository
+      .createQueryBuilder('avaliacao')
+      .innerJoin('avaliacao.agendamento', 'agendamento')
+      .select([
+        'avaliacao.id_avaliacao',
+        'avaliacao.nota_estrelas',
+        'avaliacao.comentario',
+        'avaliacao.data',
+      ])
+      .where('agendamento.id_prestador = :id', { id })
+      .orderBy('avaliacao.data', 'DESC')
+      .addOrderBy('avaliacao.id_avaliacao', 'DESC')
+      .skip((pagina - 1) * limite)
+      .take(limite)
+      .getManyAndCount();
+
+    const average = await reviewsRepository
+      .createQueryBuilder('avaliacao')
+      .innerJoin('avaliacao.agendamento', 'agendamento')
+      .select('AVG(avaliacao.nota_estrelas)', 'media')
+      .where('agendamento.id_prestador = :id', { id })
+      .getRawOne<{ media: string | null }>();
+
+    return {
+      avaliacoes: reviews.map((review) => ({
+        avaliador: 'Cliente',
+        nota_estrelas: review.nota_estrelas,
+        comentario: review.comentario,
+        data: review.data,
+      })),
+      media_avaliacoes: average?.media == null ? null : Number(average.media),
+      total_avaliacoes: total,
+      pagina,
+      limite,
+    };
+  }
+
+  async findProviderContacts(id: number) {
+    const provider = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, tipo_conta: 'PRESTADOR', deleted_at: IsNull() },
+      select: { id_usuario: true, email: true, telefone: true },
+    });
+
+    if (!provider) {
+      throw new NotFoundException('Prestador não encontrado');
+    }
+
+    return {
+      id_prestador: provider.id_usuario,
+      email: provider.email,
+      telefone: provider.telefone,
+    };
+  }
+
+  async createProviderSuggestion(
+    providerId: number,
+    dto: CreateSuggestionDto,
+    senderId: number,
+    senderType: string,
+  ) {
+    if (!['CLIENTE', 'PRESTADOR'].includes(senderType)) {
+      throw new ForbiddenException('Apenas clientes e prestadores podem enviar sugestões');
+    }
+    if (providerId === senderId) {
+      throw new BadRequestException('Escolha outro profissional para enviar uma sugestão');
+    }
+    const repository = this.sugestoesRepository;
+    if (!repository) throw new Error('Repositório de sugestões não está configurado');
+    await this.findPublicProvider(providerId);
+    const suggestion = dto.sugestao.trim();
+    if (suggestion.length < 2)
+      throw new BadRequestException('A sugestão deve ter pelo menos 2 caracteres');
+    return repository.save(
+      repository.create({
+        id_prestador: providerId,
+        id_remetente: senderId,
+        remetente_tipo: senderType,
+        sugestao: suggestion,
+      }),
+    );
+  }
+
+  async findProviderSuggestions(providerId: number, requesterId: number, requesterType: string) {
+    if (requesterType !== 'PRESTADOR' || providerId !== requesterId) {
+      throw new ForbiddenException(
+        'Apenas o profissional pode visualizar suas sugestões recebidas',
+      );
+    }
+    const repository = this.sugestoesRepository;
+    if (!repository) throw new Error('Repositório de sugestões não está configurado');
+    const suggestions = await repository.find({
+      where: { id_prestador: providerId },
+      relations: { remetente: true },
+      select: {
+        id_sugestao: true,
+        id_prestador: true,
+        id_remetente: true,
+        remetente_tipo: true,
+        sugestao: true,
+        data_criacao: true,
+        remetente: { nome_completo: true },
+      },
+      order: { data_criacao: 'DESC' },
+    });
+    return suggestions.map((item) => ({
+      id_sugestao: item.id_sugestao,
+      id_remetente: item.id_remetente,
+      remetente_tipo: item.remetente_tipo,
+      remetente_nome: item.remetente?.nome_completo || 'Usuário',
+      sugestao: item.sugestao,
+      data_criacao: item.data_criacao,
+    }));
+  }
+
+  async searchProviders(dto: SearchPrestadoresDto) {
+    const hasLatitude = dto.latitude !== undefined;
+    const hasLongitude = dto.longitude !== undefined;
+    if (hasLatitude !== hasLongitude) {
+      throw new BadRequestException('Latitude e longitude devem ser informadas juntas');
+    }
+
+    const query = this.usuariosRepository
+      .createQueryBuilder('usuario')
+      .innerJoinAndSelect('usuario.perfil_prestador', 'perfil')
+      .leftJoinAndSelect('perfil.servicos', 'servico', 'servico.ativo = :serviceActive', {
+        serviceActive: true,
+      })
+      .leftJoinAndSelect('servico.categoria', 'categoria')
+      .where('usuario.deleted_at IS NULL')
+      .andWhere('usuario.tipo_conta = :providerType', { providerType: 'PRESTADOR' });
+
+    if (dto.nome) {
+      query.andWhere('usuario.nome_completo ILIKE :name', { name: `%${dto.nome}%` });
+    }
+    if (dto.categoria) {
+      query.andWhere('categoria.nome ILIKE :category', { category: `%${dto.categoria}%` });
+    }
+    if (dto.servico) {
+      query.andWhere('servico.titulo ILIKE :service', { service: `%${dto.servico}%` });
+    }
+    if (hasLatitude && hasLongitude) {
+      const radius = dto.raio_km ?? 25;
+      query.andWhere(
+        `(6371 * acos(least(1, cos(radians(:latitude)) * cos(radians(perfil.latitude)) * cos(radians(perfil.longitude) - radians(:longitude)) + sin(radians(:latitude)) * sin(radians(perfil.latitude))))) <= :radius`,
+        { latitude: dto.latitude, longitude: dto.longitude, radius },
+      );
+    }
+
+    const providers = await query
+      .select([
+        'usuario.id_usuario',
+        'usuario.nome_completo',
+        'usuario.foto_perfil',
+        'perfil.id_usuario',
+        'perfil.latitude',
+        'perfil.longitude',
+        'perfil.bio',
+        'perfil.cidade',
+        'perfil.estado',
+        'perfil.imagem_banner',
+        'servico.id_servico',
+        'servico.titulo',
+        'servico.descricao',
+        'servico.preco',
+        'servico.duracao_padrao',
+        'categoria.id_categoria',
+        'categoria.nome',
+      ])
+      .getMany();
+
+    return providers.map((provider) => {
+      const services = provider.servicos ?? provider.perfil_prestador?.servicos ?? [];
+      return {
+        id_prestador: provider.id_usuario,
+        nome_completo: provider.nome_completo,
+        distancia_km:
+          hasLatitude && hasLongitude
+            ? this.distanceUtil?.calcularDistanciaKm(
+                dto.latitude!,
+                dto.longitude!,
+                Number(provider.perfil_prestador?.latitude),
+                Number(provider.perfil_prestador?.longitude),
+              )
+            : null,
+        perfil: provider.perfil_prestador
+          ? {
+              foto_perfil: provider.foto_perfil,
+              bio: provider.perfil_prestador.bio,
+              imagem_banner: provider.perfil_prestador.imagem_banner,
+              cidade: provider.perfil_prestador.cidade ?? null,
+              estado: provider.perfil_prestador.estado ?? null,
+            }
+          : null,
+        servicos: services.map((service) => ({
+          id_servico: service.id_servico,
+          titulo: service.titulo,
+          descricao: service.descricao,
+          preco: service.preco == null ? null : Number(service.preco),
+          duracao_padrao: service.duracao_padrao,
+          categoria: service.categoria,
+        })),
+      };
+    });
+  }
+
+  async findOne(id: number, requesterId: number, requesterType: string) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode consultar a própria conta');
+    }
+    const usuario = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, deleted_at: IsNull() },
+      relations: { perfil_prestador: true },
+    });
+    if (!usuario) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+    return this.withoutPassword(usuario);
+  }
+
+  async update(id: number, dto: UpdateUsuarioDto, requesterId: number, requesterType: string) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode alterar a própria conta');
+    }
+    const usuario = await this.findEntity(id);
+    const telefone =
+      dto.telefone === undefined ? usuario.telefone : this.normalizePhoneOrThrow(dto.telefone);
+
+    Object.assign(usuario, {
+      ...dto,
+      telefone,
+    });
+    return this.withoutPassword(await this.usuariosRepository.save(usuario));
+  }
+
+  async changePassword(
+    id: number,
+    dto: ChangePasswordDto,
+    requesterId: number,
+    requesterType: string,
+  ) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode alterar a própria senha');
+    }
+    if (dto.nova_senha !== dto.confirmar_senha) {
+      throw new BadRequestException('A confirmação da nova senha não confere');
+    }
+
+    const usuario = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, deleted_at: IsNull() },
+      select: { id_usuario: true, senha_hash: true },
+    });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+    const currentPasswordMatches = await bcryptjs.compare(dto.senha_atual, usuario.senha_hash);
+    if (!currentPasswordMatches) {
+      throw new UnauthorizedException('A senha atual está incorreta');
+    }
+    if (dto.senha_atual === dto.nova_senha) {
+      throw new BadRequestException('A nova senha deve ser diferente da senha atual');
+    }
+
+    usuario.senha_hash = await bcryptjs.hash(dto.nova_senha, 10);
+    await this.usuariosRepository.save(usuario);
+    return { message: 'Senha alterada com sucesso' };
+  }
+
+  async becomeProvider(
+    id: number,
+    dto: BecomeProviderDto,
+    requesterId: number,
+    requesterType: string,
+  ) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode solicitar o próprio perfil de prestador');
+    }
+    if (requesterType !== 'ADMIN' && requesterType !== 'CLIENTE') {
+      throw new ForbiddenException('Apenas clientes podem iniciar este onboarding');
+    }
+
+    return this.usuariosRepository.manager.transaction(async (manager) => {
+      const usuarioRepository = manager.getRepository(Usuario);
+      const perfilRepository = manager.getRepository(PerfilPrestador);
+      const usuario = await usuarioRepository.findOne({
+        where: { id_usuario: id, deleted_at: IsNull() },
+      });
+
+      if (!usuario) throw new NotFoundException('Usuário não encontrado');
+      if (usuario.tipo_conta === 'PRESTADOR') {
+        throw new ConflictException('Este usuário já é prestador');
+      }
+      if (usuario.tipo_conta !== 'CLIENTE' && requesterType !== 'ADMIN') {
+        throw new ForbiddenException('Apenas clientes podem iniciar este onboarding');
+      }
+
+      const perfil = perfilRepository.create({
+        id_usuario: id,
+        bio: dto.bio,
+        latitude: dto.latitude ?? null,
+        longitude: dto.longitude ?? null,
+        cidade: dto.cidade ?? null,
+        estado: dto.estado ?? null,
+      });
+      await perfilRepository.save(perfil);
+
+      usuario.tipo_conta = 'PRESTADOR';
+      const savedUser = await usuarioRepository.save(usuario);
+
+      return {
+        usuario: this.withoutPassword(savedUser),
+        perfil_prestador: perfil,
+      };
+    });
+  }
+
+  async remove(id: number, requesterId: number, requesterType: string) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode remover a própria conta');
+    }
+
+    return this.usuariosRepository.manager.transaction(async (manager) => {
+      const usuarioRepository = manager.getRepository(Usuario);
+      const servicoRepository = manager.getRepository('servico');
+      const usuario = await usuarioRepository.findOne({ where: { id_usuario: id } });
+
+      if (!usuario) throw new NotFoundException('Usuário não encontrado');
+      if (usuario.deleted_at) return { message: 'Usuário já foi removido' };
+
+      usuario.deleted_at = new Date();
+      await usuarioRepository.save(usuario);
+
+      await servicoRepository.update({ id_prestador: id }, { ativo: false });
+
+      return { message: 'Dados pessoais removidos com sucesso' };
+    });
+  }
+
+  async uploadProfilePhoto(
+    id: number,
+    file: UploadedImageFile,
+    requesterId: number,
+    requesterType: string,
+  ) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode alterar a própria foto de perfil');
+    }
+
+    const cloudinaryService = this.cloudinaryService;
+    if (!cloudinaryService) {
+      throw new BadRequestException('Upload de imagens não está configurado');
+    }
+
+    const usuario = await this.findEntity(id);
+    const image = await cloudinaryService.uploadImage(file, `agendamento/users/${id}`);
+    usuario.foto_perfil = image.url;
+    return this.withoutPassword(await this.usuariosRepository.save(usuario));
+  }
+
+  async uploadProviderBanner(
+    id: number,
+    file: UploadedImageFile,
+    requesterId: number,
+    requesterType: string,
+  ) {
+    if (requesterType !== 'ADMIN' && (requesterType !== 'PRESTADOR' || id !== requesterId)) {
+      throw new ForbiddenException('Você só pode alterar o próprio banner profissional');
+    }
+
+    const cloudinaryService = this.cloudinaryService;
+    if (!cloudinaryService) {
+      throw new BadRequestException('Upload de imagens não está configurado');
+    }
+
+    const usuario = await this.findEntity(id);
+    if (usuario.tipo_conta !== 'PRESTADOR' && requesterType !== 'ADMIN') {
+      throw new ForbiddenException('Apenas prestadores podem alterar o banner profissional');
+    }
+    const perfil = await this.perfisRepository.findOne({ where: { id_usuario: id } });
+    if (!perfil) throw new NotFoundException('Perfil de prestador não encontrado');
+
+    const image = await cloudinaryService.uploadImage(file, `agendamento/providers/${id}`);
+    perfil.imagem_banner = image.url;
+    return this.perfisRepository.save(perfil);
+  }
+
+  async upsertProfile(
+    id: number,
+    dto: UpsertPerfilPrestadorDto,
+    requesterId: number,
+    requesterType: string,
+  ) {
+    if (requesterType !== 'ADMIN' && id !== requesterId) {
+      throw new ForbiddenException('Você só pode alterar o próprio perfil');
+    }
+    await this.findEntity(id);
+    const perfil = await this.perfisRepository.findOne({ where: { id_usuario: id } });
+    const saved = await this.perfisRepository.save(
+      this.perfisRepository.create({ ...(perfil ?? {}), id_usuario: id, ...dto }),
+    );
+    return saved;
+  }
+
+  private async findEntity(id: number) {
+    const usuario = await this.usuariosRepository.findOne({
+      where: { id_usuario: id, deleted_at: IsNull() },
+    });
+    if (!usuario) {
+      throw new NotFoundException('Usuário não encontrado');
+    }
+    return usuario;
+  }
+
+  private withoutPassword(usuario: Usuario) {
+    const safeUser = Object.fromEntries(
+      Object.entries(usuario).filter(([key]) => key !== 'senha_hash'),
+    ) as Partial<Usuario>;
+    return safeUser;
+  }
+
+  private normalizePhoneOrThrow(value: string | undefined | null) {
+    const telefone = sanitizePhoneNumber(value);
+
+    if (telefone === null) {
+      return null;
+    }
+
+    if (!isValidPhoneNumber(telefone)) {
+      throw new BadRequestException('Telefone deve conter 11 dígitos');
+    }
+
+    return telefone;
+  }
+}

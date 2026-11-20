@@ -86,7 +86,7 @@ Logout:  POST /api/auth/logout → store the token in the revocation table
 - Token lifetime: `JWT_EXPIRATION` seconds, defaulting to `3600` in the JWT module. Refresh tokens are not implemented.
 - Roles / permissions: `CLIENTE`, `PRESTADOR`, and `ADMIN` are carried in the JWT and refreshed from the database during JWT validation. `JwtAuthGuard` protects authenticated routes and `AdminGuard` restricts administrator-only routes. Ownership checks remain in the relevant service.
 - A user may only read and change their own appointments unless their role says otherwise. This check is applied in the service query, not only in the controller.
-- Password recovery uses single-use, hashed, expiring tokens and requires SMTP variables (`MAIL_HOST`, `MAIL_PORT`, `MAIL_USER`, `MAIL_PASSWORD`, `MAIL_FROM`) plus the public frontend URL (`FRONTEND_URL`).
+- Email verification and password recovery use a secret-protected Google Apps Script web app that sends through the owner's Gmail account. Configure `GMAIL_APPS_SCRIPT_URL`, `GMAIL_APPS_SCRIPT_SECRET`, and the public frontend URL in `FRONTEND_URL`. Password reset tokens are single-use, hashed, and expiring.
 
 ## 5. Errors
 

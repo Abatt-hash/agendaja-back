@@ -47,6 +47,18 @@ Este repositório contém a API REST de backend de um sistema acadêmico de agen
    | `DB_SSL` | Configuração SSL usada pela fonte de dados das migrations do TypeORM. |
    | `JWT_SECRET` | Segredo usado para assinar JWTs. Configure um valor privado localmente. |
    | `JWT_EXPIRATION` | Duração do JWT em segundos; o modelo usa `3600`. |
+   | `GMAIL_APPS_SCRIPT_URL` | URL `/exec` do Web App do Google Apps Script que envia os e-mails. |
+   | `GMAIL_APPS_SCRIPT_SECRET` | Segredo compartilhado entre a API e o Apps Script. |
+   | `FRONTEND_URL` | URL pública do frontend usada nos links dos e-mails. |
+
+   Para configurar o envio sem Google Cloud Billing:
+   1. Crie um projeto em [Google Apps Script](https://script.google.com/) usando a conta Gmail remetente.
+   2. Copie o conteúdo de `scripts/gmail-apps-script/Code.gs` para o editor, selecione `authorizeEmail` e clique em **Executar** para autorizar o envio de e-mails.
+   3. Em **Configurações do projeto**, adicione uma propriedade de script chamada `GMAIL_APPS_SCRIPT_SECRET` com um segredo aleatório forte. Use o mesmo valor no backend.
+   4. Em **Implantar → Nova implantação → App da Web**, selecione **Executar como: eu** e **Quem pode acessar: qualquer pessoa**. Copie a URL implantada, terminada em `/exec`.
+   5. Configure essa URL e o mesmo segredo em `GMAIL_APPS_SCRIPT_URL` e `GMAIL_APPS_SCRIPT_SECRET` no backend.
+
+   O endpoint do Apps Script é acessível publicamente, mas só envia e-mails quando recebe o segredo correto. Mantenha esse segredo no backend e nas propriedades do script, nunca no frontend ou em commits. Contas Gmail pessoais têm limite diário de envio do Apps Script (atualmente 100 destinatários/dia); consulte as [quotas atuais](https://developers.google.com/apps-script/guides/services/quotas).
 
 4. Configure o banco de dados. O projeto usa PostgreSQL hospedado no [Neon](https://neon.tech); não é necessário instalar o PostgreSQL localmente.
    - Peça a um colega acesso ao banco Neon do projeto ou crie seu próprio projeto gratuito no Neon e copie os dados de conexão.
@@ -80,7 +92,7 @@ Este repositório contém a API REST de backend de um sistema acadêmico de agen
 
 ## Implantação no Render
 
-O arquivo `render.yaml` define um serviço web gratuito com health check em `/api/health`. Crie um Blueprint no Render apontando para este repositório e preencha as variáveis marcadas como `sync: false` com as credenciais do PostgreSQL Neon e do Gmail SMTP. O `JWT_SECRET` é gerado pelo Render. A migration atual já foi aplicada ao banco Neon configurado neste ambiente.
+O arquivo `render.yaml` define um serviço web gratuito com health check em `/api/health`. Crie um Blueprint no Render apontando para este repositório e preencha as variáveis marcadas como `sync: false` com as credenciais do PostgreSQL Neon, `GMAIL_APPS_SCRIPT_URL` e `GMAIL_APPS_SCRIPT_SECRET`. Configure `FRONTEND_URL` com a URL pública do frontend. O `JWT_SECRET` é gerado pelo Render. A migration atual já foi aplicada ao banco Neon configurado neste ambiente.
 
 O Render fornecerá a URL pública da API após criar o serviço. Configure essa URL como `VITE_API_BASE_URL` no build do frontend, terminando em `/api`. O frontend estático do GitHub Pages não hospeda a API.
 
@@ -169,6 +181,18 @@ This repository contains the backend REST API for a school appointment-booking s
    | `DB_SSL` | SSL setting used by the TypeORM migration data source. |
    | `JWT_SECRET` | Secret used to sign JWTs. Set a private value locally. |
    | `JWT_EXPIRATION` | JWT lifetime in seconds; the template uses `3600`. |
+   | `GMAIL_APPS_SCRIPT_URL` | Deployed `/exec` URL of the Google Apps Script email relay. |
+   | `GMAIL_APPS_SCRIPT_SECRET` | Shared secret between the API and Apps Script. |
+   | `FRONTEND_URL` | Public frontend URL used to construct email links. |
+
+   To configure email without Google Cloud billing:
+   1. Create a [Google Apps Script](https://script.google.com/) project using the Gmail sender account.
+   2. Copy `scripts/gmail-apps-script/Code.gs` into the editor, select `authorizeEmail`, and click **Run** to authorize email sending.
+   3. In **Project Settings**, add a script property named `GMAIL_APPS_SCRIPT_SECRET` with a strong random secret. Use the same value in the backend.
+   4. Under **Deploy → New deployment → Web app**, select **Execute as: Me** and **Who has access: Anyone**. Copy the deployed URL ending in `/exec`.
+   5. Set the URL and matching secret as `GMAIL_APPS_SCRIPT_URL` and `GMAIL_APPS_SCRIPT_SECRET` in the backend.
+
+   The Apps Script endpoint is publicly reachable, but only sends email when the correct secret is provided. Keep that secret in the backend and script properties only, never in the frontend or a commit. Personal Gmail accounts currently have a daily Apps Script limit of 100 email recipients; see Google's [current quotas](https://developers.google.com/apps-script/guides/services/quotas).
 
 4.  Set up the database. The project uses PostgreSQL hosted on
    [Neon](https://neon.tech); no local PostgreSQL install is needed.
@@ -205,7 +229,7 @@ This repository contains the backend REST API for a school appointment-booking s
 
 ## Deployment on Render
 
-The `render.yaml` file defines a free web service with a health check at `/api/health`. Create a Render Blueprint pointing to this repository and fill the variables marked `sync: false` with the Neon PostgreSQL and Gmail SMTP credentials. Render generates `JWT_SECRET`. The current migration has already been applied to the Neon database configured in this environment.
+The `render.yaml` file defines a free web service with a health check at `/api/health`. Create a Render Blueprint pointing to this repository and fill the variables marked `sync: false` with the Neon PostgreSQL credentials, `GMAIL_APPS_SCRIPT_URL`, and `GMAIL_APPS_SCRIPT_SECRET`. Set `FRONTEND_URL` to the public frontend URL. Render generates `JWT_SECRET`. The current migration has already been applied to the Neon database configured in this environment.
 
 Render provides the public API URL after creating the service. Set it as `VITE_API_BASE_URL` when building the frontend, ending in `/api`. GitHub Pages hosts only the static frontend, not the API.
 

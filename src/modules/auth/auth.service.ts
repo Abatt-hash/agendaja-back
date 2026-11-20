@@ -14,7 +14,6 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { createHash, createHmac, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
-import { createTransport } from 'nodemailer';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { join } from 'path';
 import { Usuario } from '../users/entities/usuario.entity';
@@ -23,6 +22,21 @@ import { RevokedToken } from './entities/revoked-token.entity';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+
+const EMAIL_REQUEST_TIMEOUT_MS = 20_000;
+
+interface EmailConfiguration {
+  relayUrl: string;
+  relaySecret: string;
+  frontendUrl: string;
+}
+
+interface EmailMessage {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -97,16 +111,7 @@ export class AuthService {
   }
 
   async requestPasswordReset(dto: RequestPasswordResetDto) {
-    const config = this.configService;
-    const host = config?.get<string>('MAIL_HOST');
-    const user = config?.get<string>('MAIL_USER');
-    const password = config?.get<string>('MAIL_PASSWORD');
-    const from = config?.get<string>('MAIL_FROM') || user;
-    if (!host || !user || !password || !from) {
-      throw new ServiceUnavailableException(
-        'A recuperação de senha por e-mail não está configurada',
-      );
-    }
+    const mail = this.getEmailConfiguration();
 
     const usuario = await this.usuariosRepository.findOne({
       where: { email: dto.email.trim().toLowerCase(), deleted_at: IsNull() },
@@ -136,19 +141,8 @@ export class AuthService {
       }),
     );
 
-    const port = Number(config?.get('MAIL_PORT', 587));
-    const secure = config?.get<string>('MAIL_SECURE') === 'true';
-    const transporter = createTransport({
-      host,
-      port,
-      secure,
-      auth: { user, pass: password },
-    });
-    const frontendUrl =
-      config?.get<string>('FRONTEND_URL') || 'https://abatt-hash.github.io/agendaja-front/';
-    const resetUrl = `${frontendUrl.replace(/\/$/, '')}/recuperar-senha?token=${encodeURIComponent(token)}`;
-    await transporter.sendMail({
-      from,
+    const resetUrl = `${mail.frontendUrl.replace(/\/$/, '')}/recuperar-senha?token=${encodeURIComponent(token)}`;
+    await this.sendEmail(mail, {
       to: usuario.email,
       subject: 'Redefinição de senha',
       text: `Use este link para redefinir sua senha. Ele expira em 1 hora: ${resetUrl}`,
@@ -197,7 +191,7 @@ export class AuthService {
   }
 
   async sendEmailVerification(usuario: Usuario, ipAddress = 'unknown') {
-    const mail = this.getMailConfiguration();
+    const mail = this.getEmailConfiguration();
     const allowed = await this.reserveEmailVerificationAttempt(
       usuario.email,
       ipAddress,
@@ -209,46 +203,96 @@ export class AuthService {
     return true;
   }
 
-  private getMailConfiguration() {
-    const config = this.configService;
-    const host = config?.get<string>('MAIL_HOST');
-    const user = config?.get<string>('MAIL_USER');
-    const password = config?.get<string>('MAIL_PASSWORD');
-    const from = config?.get<string>('MAIL_FROM') || user;
-    if (!host || !user || !password || !from) {
-      throw new ServiceUnavailableException('A verificação de e-mail não está configurada');
+  private getEmailConfiguration(): EmailConfiguration {
+    const relayUrl = this.configService?.get<string>('GMAIL_APPS_SCRIPT_URL');
+    const relaySecret = this.configService?.get<string>('GMAIL_APPS_SCRIPT_SECRET');
+    if (!relayUrl || !relaySecret) {
+      throw new ServiceUnavailableException('O envio de e-mail não está configurado');
     }
 
     return {
-      host,
-      user,
-      password,
-      from,
-      port: Number(config?.get('MAIL_PORT', 587)),
-      secure: config?.get<string>('MAIL_SECURE') === 'true',
+      relayUrl,
+      relaySecret,
       frontendUrl:
-        config?.get<string>('FRONTEND_URL') || 'https://abatt-hash.github.io/agendaja-front/',
+        this.configService?.get<string>('FRONTEND_URL') ||
+        'https://abatt-hash.github.io/agendaja-front/',
     };
   }
 
-  private async deliverEmailVerification(
-    usuario: Usuario,
-    mail: ReturnType<AuthService['getMailConfiguration']>,
-  ) {
+  private async sendEmail(mail: EmailConfiguration, message: EmailMessage) {
+    const response = await this.requestEmailApi(
+      'Gmail Apps Script relay request failed',
+      mail.relayUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: mail.relaySecret,
+          to: message.to,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+        }),
+      },
+    );
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      this.logger.error(
+        'Gmail Apps Script relay response was invalid',
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw new ServiceUnavailableException(
+        'O serviço de e-mail está indisponível. Tente novamente mais tarde.',
+      );
+    }
+
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      !('ok' in payload) ||
+      payload.ok !== true
+    ) {
+      this.logger.error('Gmail Apps Script relay did not confirm email delivery');
+      throw new ServiceUnavailableException(
+        'O serviço de e-mail está indisponível. Tente novamente mais tarde.',
+      );
+    }
+  }
+
+  private async requestEmailApi(description: string, url: string, options: RequestInit) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(EMAIL_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      this.logger.error(description, error instanceof Error ? error.stack : undefined);
+      throw new ServiceUnavailableException(
+        'O serviço de e-mail está indisponível. Tente novamente mais tarde.',
+      );
+    }
+
+    if (!response.ok) {
+      this.logger.error(`${description}; provider returned ${response.status}`);
+      throw new ServiceUnavailableException(
+        'O serviço de e-mail está indisponível. Tente novamente mais tarde.',
+      );
+    }
+    return response;
+  }
+
+  private async deliverEmailVerification(usuario: Usuario, mail: EmailConfiguration) {
     const token = randomBytes(32).toString('hex');
     usuario.email_verification_token_hash = createHash('sha256').update(token).digest('hex');
     usuario.email_verification_expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await this.usuariosRepository.save(usuario);
 
-    const transporter = createTransport({
-      host: mail.host,
-      port: mail.port,
-      secure: mail.secure,
-      auth: { user: mail.user, pass: mail.password },
-    });
     const verifyUrl = `${mail.frontendUrl.replace(/\/$/, '')}/verificar-email?token=${encodeURIComponent(token)}`;
-    await transporter.sendMail({
-      from: mail.from,
+    await this.sendEmail(mail, {
       to: usuario.email,
       subject: 'Confirme seu e-mail',
       text: `Confirme seu cadastro usando este link. Ele expira em 24 horas: ${verifyUrl}`,
@@ -271,7 +315,7 @@ export class AuthService {
     });
 
     return template
-      .replace(/\{\{appName\}\}/g, 'SAPNE')
+      .replace(/\{\{appName\}\}/g, 'AgendaJá')
       .replace(/\{\{verificationUrl\}\}/g, safeUrl);
   }
 
@@ -289,7 +333,7 @@ export class AuthService {
       return htmlEntities[character];
     });
 
-    return template.replace(/\{\{appName\}\}/g, 'SAPNE').replace(/\{\{resetUrl\}\}/g, safeUrl);
+    return template.replace(/\{\{appName\}\}/g, 'AgendaJá').replace(/\{\{resetUrl\}\}/g, safeUrl);
   }
 
   async verifyEmail(dto: { token: string }) {
@@ -342,7 +386,7 @@ export class AuthService {
     const retentionDeadline = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
     if (usuario && !usuario.email_verified_at && usuario.data_cadastro > retentionDeadline) {
       try {
-        await this.deliverEmailVerification(usuario, this.getMailConfiguration());
+        await this.deliverEmailVerification(usuario, this.getEmailConfiguration());
       } catch (error) {
         this.logger.error(
           'Email verification delivery failed',

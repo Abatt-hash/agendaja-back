@@ -69,27 +69,11 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
-  MAIL_HOST?: string;
+  GMAIL_APPS_SCRIPT_URL?: string;
 
   @IsOptional()
   @IsString()
-  MAIL_USER?: string;
-
-  @IsOptional()
-  @IsString()
-  MAIL_PASSWORD?: string;
-
-  @IsOptional()
-  @IsString()
-  MAIL_FROM?: string;
-
-  @IsOptional()
-  @IsNumber()
-  MAIL_PORT?: number;
-
-  @IsOptional()
-  @IsString()
-  MAIL_SECURE?: string;
+  GMAIL_APPS_SCRIPT_SECRET?: string;
 
   @IsOptional()
   @IsString()

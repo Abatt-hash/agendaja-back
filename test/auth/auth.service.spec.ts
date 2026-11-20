@@ -1,9 +1,18 @@
-import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import * as bcryptjs from 'bcryptjs';
 import { createHash } from 'crypto';
 import { AuthService } from '../../src/modules/auth/auth.service';
 
 describe('AuthService', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   it('returns token and user on successful login', async () => {
     const dto = { email: 'test@example.com', senha: 'plain' } as any;
 
@@ -183,7 +192,7 @@ describe('AuthService', () => {
       'http://localhost:5173/verificar-email?token=abc&source=test',
     );
 
-    expect(html).toContain('SAPNE');
+    expect(html).toContain('AgendaJá');
     expect(html).toContain('Seu cadastro está quase pronto');
     expect(html).toContain(
       'href="http://localhost:5173/verificar-email?token=abc&amp;source=test"',
@@ -196,18 +205,171 @@ describe('AuthService', () => {
     const config = {
       get: jest.fn((key: string) => {
         const values: Record<string, string> = {
-          MAIL_HOST: 'smtp.example.com',
-          MAIL_USER: 'sender@example.com',
-          MAIL_PASSWORD: 'password',
+          GMAIL_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test/exec',
+          GMAIL_APPS_SCRIPT_SECRET: 'test-relay-secret',
         };
         return values[key];
       }),
     };
     const svc = new AuthService({} as any, {} as any, {} as any, undefined, config as any);
 
-    expect((svc as any).getMailConfiguration().frontendUrl).toBe(
+    expect((svc as any).getEmailConfiguration().frontendUrl).toBe(
       'https://abatt-hash.github.io/agendaja-front/',
     );
+  });
+
+  it('sends email verification messages through the Gmail Apps Script relay', async () => {
+    const manager = {
+      query: jest
+        .fn()
+        .mockImplementation((sql: string) =>
+          sql.includes('COUNT(*) FILTER')
+            ? [{ email_count: '0', ip_count: '0', last_email_request: null }]
+            : [],
+        ),
+    };
+    const usuariosRepo = {
+      manager: { transaction: jest.fn((callback) => callback(manager)) },
+      save: jest.fn().mockImplementation(async (usuario) => usuario),
+    } as any;
+    const config = {
+      get: jest.fn(
+        (key: string) =>
+          ({
+            JWT_SECRET: 'test-secret',
+            GMAIL_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test/exec',
+            GMAIL_APPS_SCRIPT_SECRET: 'test-relay-secret',
+            FRONTEND_URL: 'https://agendaja.example/',
+          })[key],
+      ),
+    };
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: jest.fn().mockResolvedValue({ ok: true }),
+    } as unknown as Response);
+    const svc = new AuthService(usuariosRepo, {} as any, {} as any, undefined, config as any);
+    const usuario = {
+      id_usuario: 7,
+      email: 'alice@example.com',
+      data_cadastro: new Date(),
+      email_verified_at: null,
+    } as any;
+
+    await expect(svc.sendEmailVerification(usuario, '127.0.0.1')).resolves.toBe(true);
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://script.google.com/macros/s/test/exec',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const payload = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    expect(payload).toMatchObject({
+      secret: 'test-relay-secret',
+      to: 'alice@example.com',
+      subject: 'Confirme seu e-mail',
+      text: expect.stringContaining('https://agendaja.example/verificar-email?token='),
+      html: expect.stringContaining('AgendaJá'),
+    });
+  });
+
+  it('sends password reset emails through the Gmail Apps Script relay', async () => {
+    const usuariosRepo = {
+      findOne: jest.fn().mockResolvedValue({ id_usuario: 7, email: 'alice@example.com' }),
+    } as any;
+    const resetTokensRepo = {
+      update: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((value) => value),
+      save: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const config = {
+      get: jest.fn(
+        (key: string) =>
+          ({
+            GMAIL_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test/exec',
+            GMAIL_APPS_SCRIPT_SECRET: 'test-relay-secret',
+            FRONTEND_URL: 'https://agendaja.example/',
+          })[key],
+      ),
+    };
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: jest.fn().mockResolvedValue({ ok: true }),
+    } as unknown as Response);
+    const svc = new AuthService(usuariosRepo, {} as any, {} as any, resetTokensRepo, config as any);
+
+    await expect(svc.requestPasswordReset({ email: 'alice@example.com' } as any)).resolves.toEqual({
+      message: 'Se o e-mail estiver cadastrado, você receberá instruções para redefinir a senha.',
+    });
+
+    const payload = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    expect(payload).toMatchObject({
+      secret: 'test-relay-secret',
+      to: 'alice@example.com',
+      subject: 'Redefinição de senha',
+      text: expect.stringContaining('https://agendaja.example/recuperar-senha?token='),
+      html: expect.stringContaining('AgendaJá'),
+    });
+  });
+
+  it('returns service unavailable when the Gmail Apps Script relay rejects an email', async () => {
+    const usuariosRepo = {
+      findOne: jest.fn().mockResolvedValue({ id_usuario: 7, email: 'alice@example.com' }),
+    } as any;
+    const resetTokensRepo = {
+      update: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((value) => value),
+      save: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const config = {
+      get: jest.fn(
+        (key: string) =>
+          ({
+            GMAIL_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test/exec',
+            GMAIL_APPS_SCRIPT_SECRET: 'test-relay-secret',
+          })[key],
+      ),
+    };
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: jest.fn().mockResolvedValue({ ok: false }),
+    } as unknown as Response);
+    const svc = new AuthService(usuariosRepo, {} as any, {} as any, resetTokensRepo, config as any);
+
+    await expect(
+      svc.requestPasswordReset({ email: 'alice@example.com' } as any),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('returns service unavailable when the Gmail Apps Script relay times out', async () => {
+    const usuariosRepo = {
+      findOne: jest.fn().mockResolvedValue({ id_usuario: 7, email: 'alice@example.com' }),
+    } as any;
+    const resetTokensRepo = {
+      update: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((value) => value),
+      save: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const config = {
+      get: jest.fn(
+        (key: string) =>
+          ({
+            GMAIL_APPS_SCRIPT_URL: 'https://script.google.com/macros/s/test/exec',
+            GMAIL_APPS_SCRIPT_SECRET: 'test-relay-secret',
+          })[key],
+      ),
+    };
+    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('request timed out'));
+    const svc = new AuthService(usuariosRepo, {} as any, {} as any, resetTokensRepo, config as any);
+
+    await expect(
+      svc.requestPasswordReset({ email: 'alice@example.com' } as any),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('renders the password reset template with the project name and escaped reset URL', () => {
@@ -217,7 +379,7 @@ describe('AuthService', () => {
     );
 
     expect(html).toContain('Redefina sua senha');
-    expect(html).toContain('SAPNE');
+    expect(html).toContain('AgendaJá');
     expect(html).toContain(
       'href="http://localhost:5173/recuperar-senha?token=abc&amp;source=test"',
     );

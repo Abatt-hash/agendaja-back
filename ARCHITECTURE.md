@@ -1,6 +1,6 @@
 # Backend architecture
 
-REST API for the appointment-booking system (school project). The frontend is a separate repository, https://github.com/IsacFragoso/agendamento-frontend: a React 19 + Vite SPA that calls this API with `fetch` and a JWT in the `Authorization: Bearer` header.
+REST API for the AgendaJá appointment-booking system (school project). The frontend is a separate repository, <https://github.com/Abatt-hash/agendaja-front>: a React 19 + Vite SPA that calls this API with `fetch` and a JWT in the `Authorization: Bearer` header.
 
 ```text
 Browser (React SPA)  ──JSON over HTTP──▶  NestJS API (/api)  ──TypeORM──▶  PostgreSQL
@@ -13,7 +13,7 @@ Browser (React SPA)  ──JSON over HTTP──▶  NestJS API (/api)  ──Typ
 ## 1. Folder structure
 
 ```text
-agendamento-backend/
+agendaja-back/
 ├── src/
 │   ├── main.ts                 # bootstrap: global prefix /api, ValidationPipe
 │   ├── app.module.ts           # root module, TypeORM connection

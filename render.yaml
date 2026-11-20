@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: agendamento-backend
+    name: agendaja-back
     runtime: node
     plan: free
     buildCommand: npm ci --include=dev && npm run build
@@ -10,7 +10,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: FRONTEND_URL
-        value: https://isacfragoso.github.io/agendamento-frontend/
+        value: https://abatt-hash.github.io/agendaja-front/
       - key: JWT_EXPIRATION
         value: "3600"
       - key: JWT_SECRET

@@ -5,7 +5,7 @@ Rules for contributors and AI agents working in this repository. Run all command
 
 ## Related repository
 
-The frontend is a **separate repository**: `https://github.com/IsacFragoso/agendamento-frontend`. You may read relevant frontend files for context when a task involves frontend integration or an API contract, but first follow the frontend repository's `AGENTS.md` and `ARCHITECTURE.md`. Do not edit frontend files during backend work unless the user explicitly authorizes a cross-repository change. When a change alters an endpoint (path, request body, response shape, status codes), say so clearly in your summary and PR description so the frontend can be updated. Never assume the frontend will adapt on its own.
+The frontend is a **separate repository**: <https://github.com/Abatt-hash/agendaja-front>. You may read relevant frontend files for context when a task involves frontend integration or an API contract, but first follow the frontend repository's `AGENTS.md` and `ARCHITECTURE.md`. Do not edit frontend files during backend work unless the user explicitly authorizes a cross-repository change. When a change alters an endpoint (path, request body, response shape, status codes), say so clearly in your summary and PR description so the frontend can be updated. Never assume the frontend will adapt on its own.
 
 ## Source of truth
 

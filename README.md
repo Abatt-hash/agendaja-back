@@ -1,4 +1,4 @@
-# API de Agendamento
+# AgendaJá — API
 
 Este repositório contém a API REST de backend de um sistema acadêmico de agendamento. A API disponibiliza endpoints JSON para a aplicação e persiste os dados no PostgreSQL; o frontend é mantido separadamente.
 
@@ -23,7 +23,7 @@ Este repositório contém a API REST de backend de um sistema acadêmico de agen
 1. Clone este repositório:
 
    ```powershell
-   https://github.com/IsacFragoso/agendamento-backend
+   https://github.com/Abatt-hash/agendaja-back
    ```
 
 2. Instale as dependências a partir da raiz do repositório:
@@ -108,7 +108,7 @@ src/
 
 ## Repositório relacionado
 
-Frontend: <https://github.com/IsacFragoso/agendamento-frontend>. O frontend fica em um repositório separado e precisa desta API em execução para utilizar as funcionalidades de backend.
+Frontend: <https://github.com/Abatt-hash/agendaja-front>. O frontend fica em um repositório separado e precisa desta API em execução para utilizar as funcionalidades de backend.
 
 ## Fluxo de trabalho da equipe
 
@@ -123,7 +123,7 @@ Abra um pull request para `main` para cada alteração e peça ao outro integran
 
 ---
 
-# Appointment Booking API
+# AgendaJá — Appointment Booking API
 
 This repository contains the backend REST API for a school appointment-booking system. It provides JSON endpoints for the application and persists data in PostgreSQL; the frontend is maintained separately.
 
@@ -147,7 +147,7 @@ This repository contains the backend REST API for a school appointment-booking s
 
 1. Clone this repository. 
    ```powershell
-   https://github.com/IsacFragoso/agendamento-backend
+   https://github.com/Abatt-hash/agendaja-back
    ```
 2. Install dependencies from the repository root:
 
@@ -233,7 +233,7 @@ src/
 
 ## Related Repository
 
-Frontend:<https://github.com/IsacFragoso/agendamento-frontend>. The frontend is a separate repository and needs this API running to use backend features.
+Frontend: <https://github.com/Abatt-hash/agendaja-front>. The frontend is a separate repository and needs this API running to use backend features.
 
 ## Team Workflow
 

@@ -145,7 +145,7 @@ export class AuthService {
       auth: { user, pass: password },
     });
     const frontendUrl =
-      config?.get<string>('FRONTEND_URL') || 'https://isacfragoso.github.io/agendamento-frontend/';
+      config?.get<string>('FRONTEND_URL') || 'https://abatt-hash.github.io/agendaja-front/';
     const resetUrl = `${frontendUrl.replace(/\/$/, '')}/recuperar-senha?token=${encodeURIComponent(token)}`;
     await transporter.sendMail({
       from,
@@ -227,8 +227,7 @@ export class AuthService {
       port: Number(config?.get('MAIL_PORT', 587)),
       secure: config?.get<string>('MAIL_SECURE') === 'true',
       frontendUrl:
-        config?.get<string>('FRONTEND_URL') ||
-        'https://isacfragoso.github.io/agendamento-frontend/',
+        config?.get<string>('FRONTEND_URL') || 'https://abatt-hash.github.io/agendaja-front/',
     };
   }
 

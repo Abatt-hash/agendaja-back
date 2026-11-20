@@ -9,7 +9,7 @@ async function bootstrap() {
 
   const frontendUrl = configService.get<string>(
     'FRONTEND_URL',
-    'https://isacfragoso.github.io/agendamento-frontend/',
+    'https://abatt-hash.github.io/agendaja-front/',
   );
   const allowedOrigins = [new URL(frontendUrl).origin];
   if (configService.get<string>('NODE_ENV') !== 'production') {

@@ -206,7 +206,7 @@ describe('AuthService', () => {
     const svc = new AuthService({} as any, {} as any, {} as any, undefined, config as any);
 
     expect((svc as any).getMailConfiguration().frontendUrl).toBe(
-      'https://isacfragoso.github.io/agendamento-frontend/',
+      'https://abatt-hash.github.io/agendaja-front/',
     );
   });
 
